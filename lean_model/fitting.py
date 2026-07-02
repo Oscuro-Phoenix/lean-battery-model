@@ -18,10 +18,25 @@ FIT_BOUNDS = [
     (0.70, 1.0),    # frac: usable fraction of measured capacity
 ]
 
+# learnable exchange-current shape (gamma, p1, p2); (1, 0, 0) = pure CIET/MHC
+KIN_BOUNDS = [
+    (0.3, 3.0),     # gamma: endpoint sharpness exponent
+    (-3.0, 3.0),    # p1: peak asymmetry
+    (-4.0, 4.0),    # p2: peak width
+]
+
 PARAM_NAMES = ["a", "Da_w", "beta", "Da", "Da_p1", "R_s", "frac"]
+KIN_NAMES = ["gamma", "p1", "p2"]
 
 
-def _objective(p, curves, ocv, w_tail=1.0):
+def _objective(p, curves, ocv, w_tail=1.0, learn_kinetics=False):
+    if learn_kinetics:
+        p, kin_shape = p[:7], tuple(p[7:])
+        gamma = kin_shape[0]
+        if not (KIN_BOUNDS[0][0] <= gamma <= KIN_BOUNDS[0][1]):
+            return 1e6
+    else:
+        kin_shape = None
     a, Da_w, beta, Da, Da_p1, R_s, frac = p
     if not (0 < a < 0.8 and Da_w > 0 and 0 <= beta <= 0.5 and Da > 0
             and Da_p1 > 0 and R_s >= 0 and 0 < frac <= 1.0):
@@ -29,7 +44,7 @@ def _objective(p, curves, ocv, w_tail=1.0):
     tot, n = 0.0, 0
     for crate, (soc, V) in curves.items():
         try:
-            Vp = model_V(soc, p, crate, ocv)
+            Vp = model_V(soc, p, crate, ocv, kin_shape=kin_shape)
         except Exception:
             return 1e6
         if not np.all(np.isfinite(Vp)):
@@ -41,18 +56,19 @@ def _objective(p, curves, ocv, w_tail=1.0):
     return tot / max(n, 1)
 
 
-def plain_rms(p, curves, ocv):
+def plain_rms(p, curves, ocv, kin_shape=None):
     """Unweighted voltage RMS residual [V] over all curves."""
     se, n = 0.0, 0
     for crate, (soc, V) in curves.items():
-        r = model_V(soc, p, crate, ocv) - V
+        r = model_V(soc, p, crate, ocv, kin_shape=kin_shape) - V
         se += np.sum(r * r)
         n += r.size
     return np.sqrt(se / n)
 
 
-def fit_descriptors(curves, ocv, maxiter=600, seed=1, callback=None):
-    """Fit the seven lean-model descriptors to measured discharge data.
+def fit_descriptors(curves, ocv, maxiter=600, seed=1, callback=None,
+                    learn_kinetics=False):
+    """Fit the lean-model descriptors to measured discharge data.
 
     Parameters
     ----------
@@ -64,15 +80,25 @@ def fit_descriptors(curves, ocv, maxiter=600, seed=1, callback=None):
         dual_annealing iteration budget (larger = slower but more robust).
     callback : callable or None
         Optional dual_annealing callback(x, f, context) for progress.
+    learn_kinetics : bool
+        If True, also learn the exchange-current shape (gamma, p1, p2) of
+        ``ecd_mhc_learnable`` instead of assuming the pure CIET/MHC form.
 
     Returns
     -------
     result : dict
-        Fitted parameters by name, plus "rms" [V] and the raw vector "x".
+        Fitted parameters by name, plus "rms" [V], the raw descriptor vector
+        "x", and (if learned) "kin_shape" = (gamma, p1, p2).
     """
-    res = dual_annealing(_objective, FIT_BOUNDS, args=(curves, ocv),
+    bounds = FIT_BOUNDS + (KIN_BOUNDS if learn_kinetics else [])
+    res = dual_annealing(_objective, bounds,
+                         args=(curves, ocv, 1.0, learn_kinetics),
                          maxiter=maxiter, seed=seed, callback=callback)
-    out = dict(zip(PARAM_NAMES, res.x))
-    out["rms"] = plain_rms(res.x, curves, ocv)
-    out["x"] = res.x
+    x, kin_shape = res.x[:7], (tuple(res.x[7:]) if learn_kinetics else None)
+    out = dict(zip(PARAM_NAMES, x))
+    if learn_kinetics:
+        out.update(dict(zip(KIN_NAMES, kin_shape)))
+    out["rms"] = plain_rms(x, curves, ocv, kin_shape=kin_shape)
+    out["x"] = x
+    out["kin_shape"] = kin_shape
     return out

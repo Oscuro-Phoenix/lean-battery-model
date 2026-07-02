@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from lean_model.kinetics import V_T, ecd_mhc, ecd_mhc_df_dclyte
+from lean_model.kinetics import (
+    V_T, ecd_mhc, ecd_mhc_df_dclyte, ecd_mhc_learnable,
+)
 
 
 def predict_vq(ocv_function, X, Da_w, Da_w_sigma, Da_w_kappa, Da, Da_p,
-               drop_saturated=False):
+               drop_saturated=False, ecd_fn=None):
     """Leading-order galvanostatic discharge voltage of the lean model.
 
     Parameters
@@ -27,6 +29,9 @@ def predict_vq(ocv_function, X, Da_w, Da_w_sigma, Da_w_kappa, Da, Da_p,
     drop_saturated : bool
         If True, return NaN where the surface has saturated (ecd below
         threshold) instead of snapping back to the OCV; use for plotting.
+    ecd_fn : callable or None
+        Exchange-current factor f(c). Defaults to the pure CIET/MHC form
+        ``ecd_mhc``; pass e.g. a learned/custom shape to override.
 
     Returns
     -------
@@ -34,7 +39,7 @@ def predict_vq(ocv_function, X, Da_w, Da_w_sigma, Da_w_kappa, Da, Da_p,
         Cell voltage [V] at each stoichiometry.
     """
     X = np.asarray(X, dtype=float)
-    ec = ecd_mhc(X)
+    ec = (ecd_fn or ecd_mhc)(X)
     alpha = ecd_mhc_df_dclyte(X)
 
     Lambda = np.sqrt(Da_w * ec + alpha * Da / Da_p)
@@ -55,7 +60,8 @@ def predict_vq(ocv_function, X, Da_w, Da_w_sigma, Da_w_kappa, Da, Da_p,
     return V
 
 
-def model_V(soc, params, crate, ocv, drop_saturated=False, v_min=None):
+def model_V(soc, params, crate, ocv, drop_saturated=False, v_min=None,
+            kin_shape=None):
     """Lean-model voltage at normalized capacity points `soc` for C-rate `crate`.
 
     ``params`` is the 7-tuple used throughout the app and the fitter:
@@ -70,6 +76,9 @@ def model_V(soc, params, crate, ocv, drop_saturated=False, v_min=None):
 
     If ``v_min`` is given, voltages below the cutoff are masked to NaN so the
     discharge terminates at the cutoff instead of diving indefinitely.
+
+    ``kin_shape`` optionally deforms the exchange-current prefactor from the
+    pure CIET/MHC form: a (gamma, p1, p2) tuple for ``ecd_mhc_learnable``.
     """
     a, Da_w, beta, Da, Da_p1, R_s, frac = params
     span = (1.0 - a) / frac
@@ -77,11 +86,16 @@ def model_V(soc, params, crate, ocv, drop_saturated=False, v_min=None):
     Da_p = Da_p1 / crate
     Da_w_s, Da_w_k = beta * Da_w, (1.0 - beta) * Da_w
 
+    ecd_fn = None
+    if kin_shape is not None:
+        gamma, p1, p2 = kin_shape
+        ecd_fn = lambda c: ecd_mhc_learnable(c, gamma=gamma, p1=p1, p2=p2)
+
     def ocv_of_cs(c):
         return ocv(np.clip((c - a) / span, 0.0, 1.0))
 
     V = predict_vq(ocv_of_cs, cs, Da_w, Da_w_s, Da_w_k, Da, Da_p,
-                   drop_saturated=drop_saturated)
+                   drop_saturated=drop_saturated, ecd_fn=ecd_fn)
     V = V - R_s * crate
     if v_min is not None:
         V = np.where(V >= v_min, V, np.nan)

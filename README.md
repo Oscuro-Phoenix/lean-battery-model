@@ -14,12 +14,16 @@ fingerprint — no PDE solver required.
   (`Da_w`, `Da`, `Da_p`, series resistance, usable-capacity fraction) or
   dimensional cell parameters (thickness, particle size, conductivities,
   kinetics, …) and get V–Q curves at any C-rates. Built-in NMC532 OCV or
-  upload your own.
+  upload your own. An advanced panel lets you swap the pure CIET/MHC
+  exchange-current prefactor for a custom `f(c)` shape with a live preview.
 - **Fit discharge data** — upload discharge CSVs at 2–3 C-rates plus an OCV
   reference; a global (dual-annealing) fit returns the lean descriptors
   (`Da_w`, `Da`, `Da_p` at 1C, `R_s`, start stoichiometry, usable-capacity
-  fraction) and the voltage RMS. Includes a demo dataset (HP-NMC111
-  half-cell, digitized from Ren et al. 2019).
+  fraction) and the voltage RMS. Optionally **learn the exchange-current
+  shape** `f(c)`: a 3-parameter deformation (sharpness γ, asymmetry p₁,
+  width p₂) of the CIET/MHC prefactor, fitted alongside the descriptors and
+  compared against the pure form graphically. Includes a demo dataset
+  (HP-NMC111 half-cell, digitized from Ren et al. 2019).
 - **Fit EIS** — upload an impedance spectrum (frequency, Z′, Z″) and fit the
   *analytical* lean-model impedance directly (no equivalent circuit),
   returning `R_Ω`, the impedance scale, `Da_w`, `Da_p`, `Da_c`, and the
@@ -77,8 +81,8 @@ docker run -p 8501:8501 -v "$PWD":/app -w /app python:3.12-slim \
 app.py                     Streamlit UI (predict / fit V-Q / fit EIS /
                            calculator / about)
 lean_model/
-  kinetics.py              CIET/MHC exchange-current factor f(c) and its
-                           electrolyte log-derivative (NumPy only)
+  kinetics.py              CIET/MHC exchange-current factor f(c), learnable
+                           shape variant, electrolyte log-derivative
   model.py                 leading-order analytical V-Q solution (predict_vq)
   eis.py                   analytical impedance + EIS fitter
   dimensionless.py         dimensional parameters -> Da, Da_p, Da_w, Da_c

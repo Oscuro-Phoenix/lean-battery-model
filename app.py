@@ -19,8 +19,9 @@ import streamlit as st
 from matplotlib.colors import to_hex
 
 from lean_model import (
-    compute_da_numbers, eis_model, fit_descriptors, fit_eis, model_V,
-    nmc532_ocv, nmc532_ocv_deriv, ocv_derivative, ocv_from_table,
+    compute_da_numbers, ecd_mhc, ecd_mhc_learnable, eis_model,
+    fit_descriptors, fit_eis, model_V, nmc532_ocv, nmc532_ocv_deriv,
+    ocv_derivative, ocv_from_table,
 )
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -102,7 +103,7 @@ def rate_colors(crates):
     return {c: to_hex(cmap(0.05 + 0.9 * (c - lo) / span)) for c in crates}
 
 
-def plot_curves(curves, params, ocv, title="", v_min=None):
+def plot_curves(curves, params, ocv, title="", v_min=None, kin_shape=None):
     """Interactive overlay of measured points (if any) and lean-model curves."""
     fig = go.Figure()
     colors = rate_colors(list(curves.keys()))
@@ -126,7 +127,7 @@ def plot_curves(curves, params, ocv, title="", v_min=None):
         fig.add_trace(go.Scatter(
             x=socg,
             y=model_V(socg, params, crate, ocv, drop_saturated=True,
-                      v_min=v_min),
+                      v_min=v_min, kin_shape=kin_shape),
             mode="lines", name=f"{crate:g}C model",
             line=dict(color=col, width=2.5),
             hovertemplate="q=%{x:.3f}<br>V=%{y:.3f} V"
@@ -170,14 +171,38 @@ def nyquist_figure(freq, z_re, z_im, z_fit=None):
     return fig
 
 
-def predictions_csv(params, crates, ocv, v_min=None) -> bytes:
+def predictions_csv(params, crates, ocv, v_min=None, kin_shape=None) -> bytes:
     frac = params[6]
     socg = np.linspace(1e-3, min(frac, 0.999), 400)
     out = {"normalized_capacity": socg, "OCV_V": ocv(socg)}
     for c in crates:
         out[f"V_{c:g}C"] = model_V(socg, params, c, ocv, drop_saturated=True,
-                                   v_min=v_min)
+                                   v_min=v_min, kin_shape=kin_shape)
     return pd.DataFrame(out).to_csv(index=False).encode()
+
+
+def kinetics_figure(kin_shape=None):
+    """f(c) preview: pure CIET/MHC vs custom/learned shape."""
+    c = np.linspace(1e-3, 1 - 1e-3, 300)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=c, y=ecd_mhc(c), mode="lines", name="CIET/MHC",
+        line=dict(color="#8a8a8a", width=2, dash="dash"),
+        hovertemplate="c=%{x:.3f}<br>f=%{y:.4f}<extra>CIET/MHC</extra>"))
+    if kin_shape is not None:
+        g, p1, p2 = kin_shape
+        fig.add_trace(go.Scatter(
+            x=c, y=ecd_mhc_learnable(c, gamma=g, p1=p1, p2=p2),
+            mode="lines", name="custom f(c)",
+            line=dict(color="#d62728", width=2.5),
+            hovertemplate="c=%{x:.3f}<br>f=%{y:.4f}<extra>custom</extra>"))
+    fig.update_layout(
+        xaxis=dict(title="Filling fraction c", range=[0, 1]),
+        yaxis=dict(title="Exchange-current factor f(c)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=10, r=10, t=40, b=10), height=320,
+        template="plotly_white")
+    return fig
 
 
 def ocv_selector(key: str):
@@ -285,10 +310,34 @@ with tab_predict:
         params = (a, Da_w_tot, min(beta, 0.5), groups["Da"], groups["Da_p"],
                   R_s, frac)
 
-    fig = plot_curves({c: None for c in crates}, params, ocv, v_min=v_cut)
+    with st.expander("Exchange-current kinetics f(c) — advanced"):
+        st.markdown(
+            "By default the exchange-current prefactor is the pure CIET/MHC "
+            "form. Enable a custom shape to explore non-typical kinetics "
+            "$f(\\tilde c_s)$: a symmetric sharpness exponent plus "
+            "asymmetry and width corrections (identical to the *learnable* "
+            "form on the fitting tab)."
+        )
+        custom_kin = st.checkbox("Use custom (non-CIET) f(c)",
+                                 key="pred_custom_kin")
+        kin_shape = None
+        if custom_kin:
+            k1, k2, k3 = st.columns(3)
+            g_ = k1.slider("γ — endpoint sharpness", 0.3, 3.0, 1.0, 0.05,
+                           help="γ<1: flatter near c=0,1; γ>1: sharper decay.")
+            p1_ = k2.slider("p₁ — asymmetry", -3.0, 3.0, 0.0, 0.1,
+                            help="Skews the peak toward low/high filling.")
+            p2_ = k3.slider("p₂ — peak width", -4.0, 4.0, 0.0, 0.1,
+                            help="Narrows (<0) or broadens (>0) the peak.")
+            kin_shape = (g_, p1_, p2_)
+        st.plotly_chart(kinetics_figure(kin_shape), use_container_width=True)
+
+    fig = plot_curves({c: None for c in crates}, params, ocv, v_min=v_cut,
+                      kin_shape=kin_shape)
     st.plotly_chart(fig, use_container_width=True)
     st.download_button("Download predicted curves (CSV)",
-                       predictions_csv(params, crates, ocv, v_min=v_cut),
+                       predictions_csv(params, crates, ocv, v_min=v_cut,
+                                       kin_shape=kin_shape),
                        "lean_model_prediction.csv", "text/csv")
 
 
@@ -328,12 +377,20 @@ with tab_fit:
             curves[c] = (soc, v)
 
     if curves:
-        maxiter = st.slider("Fit effort (dual-annealing iterations)",
+        cM, cK = st.columns([2, 1])
+        maxiter = cM.slider("Fit effort (dual-annealing iterations)",
                             100, 2000, 600, 100,
                             help="More iterations = more robust fit, slower.")
+        learn_kin = cK.checkbox(
+            "Learn kinetics shape f(c)",
+            help="Also fit a 3-parameter deformation (γ, p₁, p₂) of the "
+                 "CIET/MHC exchange-current prefactor instead of assuming "
+                 "its pure form. Use when the residual is systematic in "
+                 "mid-discharge. Slower; needs 3+ rates to be meaningful.")
         if st.button("Run fit", type="primary"):
             with st.spinner(f"Fitting {len(curves)} curve(s)…"):
-                result = fit_descriptors(curves, ocv_fit, maxiter=maxiter)
+                result = fit_descriptors(curves, ocv_fit, maxiter=maxiter,
+                                         learn_kinetics=learn_kin)
             st.session_state["fit_result"] = result
             st.session_state["fit_curves"] = curves
             st.session_state["fit_ocv"] = ocv_fit
@@ -341,20 +398,24 @@ with tab_fit:
     if "fit_result" in st.session_state and curves:
         r = st.session_state["fit_result"]
         st.markdown("#### Fitted lean-model descriptors")
-        st.dataframe(pd.DataFrame({
-            "Descriptor": ["Wiring group Da_w",
-                           "Electrolyte group Da",
-                           "Process group Da_p (at 1C)",
-                           "Da/Da_p (at 1C)",
-                           "Series resistance R_s (mV per C)",
-                           "Start stoichiometry a",
-                           "Usable capacity fraction",
-                           "Voltage RMS (mV)"],
-            "Value": [f"{r['Da_w']:.3g}", f"{r['Da']:.3g}",
-                      f"{r['Da_p1']:.3g}", f"{r['Da'] / r['Da_p1']:.3g}",
-                      f"{r['R_s'] * 1e3:.1f}", f"{r['a']:.3f}",
-                      f"{r['frac']:.3f}", f"{r['rms'] * 1e3:.1f}"],
-        }), hide_index=True, use_container_width=True)
+        names = ["Wiring group Da_w",
+                 "Electrolyte group Da",
+                 "Process group Da_p (at 1C)",
+                 "Da/Da_p (at 1C)",
+                 "Series resistance R_s (mV per C)",
+                 "Start stoichiometry a",
+                 "Usable capacity fraction",
+                 "Voltage RMS (mV)"]
+        vals = [f"{r['Da_w']:.3g}", f"{r['Da']:.3g}",
+                f"{r['Da_p1']:.3g}", f"{r['Da'] / r['Da_p1']:.3g}",
+                f"{r['R_s'] * 1e3:.1f}", f"{r['a']:.3f}",
+                f"{r['frac']:.3f}", f"{r['rms'] * 1e3:.1f}"]
+        if r.get("kin_shape") is not None:
+            names += ["Kinetics γ (sharpness)", "Kinetics p₁ (asymmetry)",
+                      "Kinetics p₂ (width)"]
+            vals += [f"{r['gamma']:.3f}", f"{r['p1']:.3f}", f"{r['p2']:.3f}"]
+        st.dataframe(pd.DataFrame({"Descriptor": names, "Value": vals}),
+                     hide_index=True, use_container_width=True)
 
         # end model curves at the lowest measured voltage (the cell's cutoff)
         v_cut_fit = min(float(v.min())
@@ -362,11 +423,15 @@ with tab_fit:
         fig = plot_curves(st.session_state["fit_curves"], tuple(r["x"]),
                           st.session_state["fit_ocv"],
                           title="Measured (points) vs lean model (lines)",
-                          v_min=v_cut_fit)
+                          v_min=v_cut_fit, kin_shape=r.get("kin_shape"))
         st.plotly_chart(fig, use_container_width=True)
+        if r.get("kin_shape") is not None:
+            st.markdown("##### Learned exchange-current shape vs CIET/MHC")
+            st.plotly_chart(kinetics_figure(r["kin_shape"]),
+                            use_container_width=True)
 
         payload = {k: (float(v) if np.isscalar(v) else list(map(float, v)))
-                   for k, v in r.items()}
+                   for k, v in r.items() if v is not None}
         st.download_button("Download fit results (JSON)",
                            json.dumps(payload, indent=2),
                            "lean_model_fit.json", "application/json")
