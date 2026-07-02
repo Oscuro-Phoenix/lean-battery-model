@@ -14,10 +14,13 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import streamlit as st
+from matplotlib.colors import to_hex
 
 from lean_model import (
-    compute_da_numbers, fit_descriptors, model_V, nmc532_ocv, ocv_from_table,
+    compute_da_numbers, eis_model, fit_descriptors, fit_eis, model_V,
+    nmc532_ocv, nmc532_ocv_deriv, ocv_derivative, ocv_from_table,
 )
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +65,29 @@ def parse_two_col_csv(uploaded) -> tuple[np.ndarray, np.ndarray, bool]:
     return x[m][order], v[m][order], normalized
 
 
+def parse_eis_csv(uploaded):
+    """Read an EIS CSV: frequency (Hz), Z' (Ohm), Z'' (Ohm), header optional.
+
+    Returns (freq, z_re, z_im, flipped); if the imaginary column is mostly
+    positive it is assumed to be -Z'' and flipped (flagged via `flipped`).
+    """
+    raw = uploaded.read() if hasattr(uploaded, "read") else open(uploaded, "rb").read()
+    df = pd.read_csv(io.BytesIO(raw), header=None)
+    if df.iloc[0].apply(lambda v: not str(v).replace(".", "").replace("-", "")
+                        .replace("e", "").replace("E", "").replace("+", "")
+                        .isdigit()).any():
+        df = df.iloc[1:]
+    df = df.iloc[:, :3].apply(pd.to_numeric, errors="coerce").dropna()
+    freq = df.iloc[:, 0].to_numpy(float)
+    z_re = df.iloc[:, 1].to_numpy(float)
+    z_im = df.iloc[:, 2].to_numpy(float)
+    flipped = False
+    if np.nanmedian(z_im) > 0:  # user supplied -Z''
+        z_im, flipped = -z_im, True
+    order = np.argsort(freq)
+    return freq[order], z_re[order], z_im[order], flipped
+
+
 def crate_from_name(name: str) -> float | None:
     """Guess the C-rate from a filename like '0.5C.csv' or 'discharge_2C.csv'."""
     import re
@@ -73,35 +99,74 @@ def rate_colors(crates):
     cmap = plt.cm.coolwarm
     lo, hi = min(crates), max(crates)
     span = (hi - lo) or 1.0
-    return {c: cmap(0.05 + 0.9 * (c - lo) / span) for c in crates}
+    return {c: to_hex(cmap(0.05 + 0.9 * (c - lo) / span)) for c in crates}
 
 
 def plot_curves(curves, params, ocv, title="", v_min=None):
-    """Overlay measured points (if any) and lean-model curves."""
-    fig, ax = plt.subplots(figsize=(7.5, 5))
+    """Interactive overlay of measured points (if any) and lean-model curves."""
+    fig = go.Figure()
     colors = rate_colors(list(curves.keys()))
     frac = params[6]
     socg = np.linspace(1e-3, min(frac, 0.999), 400)
+    socf = np.linspace(1e-3, 0.999, 400)
+    fig.add_trace(go.Scatter(
+        x=socf, y=ocv(socf), mode="lines", name="OCV",
+        line=dict(color="#8a8a8a", width=1.4, dash="dash"),
+        hovertemplate="q=%{x:.3f}<br>U=%{y:.3f} V<extra>OCV</extra>"))
     for crate, data in sorted(curves.items()):
+        col = colors[crate]
         if data is not None:
             soc, V = data
-            ax.scatter(soc, V, s=28, color=colors[crate], edgecolors="black",
-                       linewidths=0.5, alpha=0.8, zorder=3)
-        ax.plot(socg, model_V(socg, params, crate, ocv, drop_saturated=True,
-                              v_min=v_min),
-                lw=2.2, color=colors[crate], label=f"{crate:g}C", zorder=2)
-    socf = np.linspace(1e-3, 0.999, 400)
-    ax.plot(socf, ocv(socf), color="0.45", ls=(0, (4, 3)), lw=1.4, label="OCV")
+            fig.add_trace(go.Scatter(
+                x=soc, y=V, mode="markers", name=f"{crate:g}C data",
+                marker=dict(color=col, size=7,
+                            line=dict(color="black", width=0.5)),
+                hovertemplate="q=%{x:.3f}<br>V=%{y:.3f} V"
+                              f"<extra>{crate:g}C data</extra>"))
+        fig.add_trace(go.Scatter(
+            x=socg,
+            y=model_V(socg, params, crate, ocv, drop_saturated=True,
+                      v_min=v_min),
+            mode="lines", name=f"{crate:g}C model",
+            line=dict(color=col, width=2.5),
+            hovertemplate="q=%{x:.3f}<br>V=%{y:.3f} V"
+                          f"<extra>{crate:g}C model</extra>"))
     if v_min is not None:
-        ax.axhline(v_min, color="0.6", lw=0.9, ls=":", zorder=1)
-        ax.set_ylim(bottom=v_min - 0.1)
-    ax.set_xlabel("Normalized capacity (–)")
-    ax.set_ylabel("Voltage (V)")
-    ax.set_xlim(0, 1)
-    if title:
-        ax.set_title(title)
-    ax.legend(frameon=False, fontsize=9)
-    fig.tight_layout()
+        fig.add_hline(y=v_min, line=dict(color="#aaaaaa", width=1,
+                                         dash="dot"))
+    fig.update_layout(
+        title=title or None,
+        xaxis=dict(title="Normalized capacity (–)", range=[0, 1]),
+        yaxis=dict(title="Voltage (V)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=10, r=10, t=60, b=10), height=480,
+        template="plotly_white")
+    return fig
+
+
+def nyquist_figure(freq, z_re, z_im, z_fit=None):
+    """Interactive Nyquist plot (frequency shown on hover)."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=z_re, y=-np.asarray(z_im), mode="markers", name="data",
+        customdata=np.asarray(freq),
+        marker=dict(color="#1f77b4", size=7,
+                    line=dict(color="black", width=0.5)),
+        hovertemplate="f=%{customdata:.3g} Hz<br>Z'=%{x:.3g} Ω<br>"
+                      "-Z''=%{y:.3g} Ω<extra>data</extra>"))
+    if z_fit is not None:
+        fig.add_trace(go.Scatter(
+            x=np.real(z_fit), y=-np.imag(z_fit), mode="lines",
+            name="lean model", customdata=np.asarray(freq),
+            line=dict(color="#d62728", width=2.5),
+            hovertemplate="f=%{customdata:.3g} Hz<br>Z'=%{x:.3g} Ω<br>"
+                          "-Z''=%{y:.3g} Ω<extra>model</extra>"))
+    fig.update_layout(
+        xaxis=dict(title="Z' (Ω)"),
+        yaxis=dict(title="-Z'' (Ω)", scaleanchor="x", scaleratio=1),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=10, r=10, t=60, b=10), height=480,
+        template="plotly_white")
     return fig
 
 
@@ -136,8 +201,9 @@ def ocv_selector(key: str):
 
 # ── tabs ───────────────────────────────────────────────────────────────────
 
-tab_predict, tab_fit, tab_calc, tab_about = st.tabs(
-    ["Predict discharge", "Fit your data", "Damköhler calculator", "About"])
+tab_predict, tab_fit, tab_eis, tab_calc, tab_about = st.tabs(
+    ["Predict discharge", "Fit discharge data", "Fit EIS",
+     "Damköhler calculator", "About"])
 
 
 # ── 1. Predict ─────────────────────────────────────────────────────────────
@@ -220,7 +286,7 @@ with tab_predict:
                   R_s, frac)
 
     fig = plot_curves({c: None for c in crates}, params, ocv, v_min=v_cut)
-    st.pyplot(fig, use_container_width=False)
+    st.plotly_chart(fig, use_container_width=True)
     st.download_button("Download predicted curves (CSV)",
                        predictions_csv(params, crates, ocv, v_min=v_cut),
                        "lean_model_prediction.csv", "text/csv")
@@ -297,7 +363,7 @@ with tab_fit:
                           st.session_state["fit_ocv"],
                           title="Measured (points) vs lean model (lines)",
                           v_min=v_cut_fit)
-        st.pyplot(fig, use_container_width=False)
+        st.plotly_chart(fig, use_container_width=True)
 
         payload = {k: (float(v) if np.isscalar(v) else list(map(float, v)))
                    for k, v in r.items()}
@@ -306,7 +372,97 @@ with tab_fit:
                            "lean_model_fit.json", "application/json")
 
 
-# ── 3. Damköhler calculator ────────────────────────────────────────────────
+# ── 3. Fit EIS ─────────────────────────────────────────────────────────────
+
+with tab_eis:
+    st.subheader("Fit an impedance spectrum with the analytical lean model")
+    st.markdown(
+        "Upload a CSV with three columns: **frequency (Hz)**, **Z′ (Ω)**, "
+        "**Z″ (Ω)**. The analytical porous-electrode impedance is fit "
+        "directly — no equivalent circuit — returning the ohmic resistance, "
+        "the impedance scale, and the wiring ($Da_w$), process ($Da_p$), and "
+        "capacitive ($Da_c$) groups."
+    )
+
+    demo_eis = st.toggle("Use demo data (synthetic lean-model spectrum)",
+                         key="demo_eis")
+
+    eis_data = None
+    if demo_eis:
+        f_, zr_, zi_, _ = parse_eis_csv(os.path.join(SAMPLE_DIR,
+                                                     "EIS_demo.csv"))
+        eis_data = (f_, zr_, zi_)
+        st.success(f"Loaded demo spectrum ({len(f_)} points, "
+                   f"{f_.min():.3g}–{f_.max():.3g} Hz).")
+    else:
+        up_eis = st.file_uploader("EIS CSV (frequency Hz, Z′ Ω, Z″ Ω)",
+                                  type="csv", key="eis_file")
+        if up_eis is not None:
+            f_, zr_, zi_, flipped = parse_eis_csv(up_eis)
+            if flipped:
+                st.warning("Imaginary column was mostly positive — "
+                           "interpreted as −Z″ and flipped.")
+            eis_data = (f_, zr_, zi_)
+
+    if eis_data is not None:
+        c1, c2, c3 = st.columns(3)
+        stoich = c1.slider("Filling fraction at measurement", 0.05, 0.95,
+                           0.30, 0.01,
+                           help="Local state of charge of the electrode "
+                                "when the spectrum was taken.")
+        ocv_src = c2.radio("OCV slope dU/dx from",
+                           ["Built-in NMC532", "Upload OCV CSV"],
+                           key="eis_ocv_src")
+        maxiter_eis = c3.slider("Fit effort", 100, 1000, 300, 50,
+                                key="eis_maxiter")
+        if ocv_src.startswith("Built-in"):
+            dudx = float(nmc532_ocv_deriv(stoich))
+        else:
+            up_ocv = st.file_uploader("OCV CSV (SoC 0–1, voltage V)",
+                                      type="csv", key="eis_ocv_file")
+            if up_ocv is None:
+                st.info("Upload an OCV file to set dU/dx, or use the "
+                        "built-in OCV.")
+                st.stop()
+            s_, v_, _ = parse_two_col_csv(up_ocv)
+            dudx = float(ocv_derivative(ocv_from_table(s_, v_), stoich))
+        st.caption(f"OCV slope at x = {stoich:.2f}:  dU/dx = {dudx:.3f} V")
+
+        if st.button("Run EIS fit", type="primary", key="run_eis"):
+            with st.spinner("Fitting impedance spectrum…"):
+                r = fit_eis(*eis_data, stoich=stoich, dudx=dudx,
+                            maxiter=maxiter_eis)
+            st.session_state["eis_result"] = r
+            st.session_state["eis_data"] = eis_data
+
+        if "eis_result" in st.session_state:
+            r = st.session_state["eis_result"]
+            f_, zr_, zi_ = st.session_state["eis_data"]
+            st.markdown("#### Fitted impedance descriptors")
+            st.dataframe(pd.DataFrame({
+                "Descriptor": ["Ohmic resistance R_Ω (Ω)",
+                               "Impedance scale R_z (Ω)",
+                               "Wiring group Da_w",
+                               "Process group Da_p (at 1C)",
+                               "Capacitive group Da_c (at 1C)",
+                               "Conductivity ratio R_hf",
+                               "Relative RMS (%)"],
+                "Value": [f"{r['R_ohm']:.3g}", f"{r['R_z']:.3g}",
+                          f"{r['Da_w']:.3g}", f"{r['Da_p1']:.3g}",
+                          f"{r['Da_c1']:.3g}", f"{r['R_hf']:.3g}",
+                          f"{100 * r['rel_rms']:.2f}"],
+            }), hide_index=True, use_container_width=True)
+
+            st.plotly_chart(nyquist_figure(f_, zr_, zi_, r["Z_fit"]),
+                            use_container_width=True)
+
+            payload = {k: float(v) for k, v in r.items() if np.isscalar(v)}
+            st.download_button("Download EIS fit (JSON)",
+                               json.dumps(payload, indent=2),
+                               "lean_model_eis_fit.json", "application/json")
+
+
+# ── 4. Damköhler calculator ────────────────────────────────────────────────
 
 with tab_calc:
     st.subheader("Damköhler-number calculator")
@@ -368,7 +524,7 @@ with tab_calc:
                    "at this C-rate.")
 
 
-# ── 4. About ───────────────────────────────────────────────────────────────
+# ── 5. About ───────────────────────────────────────────────────────────────
 
 with tab_about:
     st.subheader("About the lean model")
@@ -395,6 +551,11 @@ transfer (CIET/MHC) kinetics.
 rate data ($V$–$Q$ curves at 2–3 C-rates plus a low-rate OCV), separating
 wiring, electrolyte, kinetic, and capacity-utilization limitations without
 running a PDE solver.
+
+**EIS** is fit with the same physics: the linearized lean model yields an
+analytical porous-electrode impedance (no equivalent circuit), whose arc is
+set by $Da_w$ and $Da_c$ and whose low-frequency tail follows from $Da_p$
+and the local OCV slope $dU/dx$.
 
 **Reference:** S. Pathak and M. Z. Bazant, *Scaling and Analytical
 Approximation of Porous Electrode Theory for Reaction-limited Batteries*,

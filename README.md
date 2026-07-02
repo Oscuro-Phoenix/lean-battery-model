@@ -15,21 +15,34 @@ fingerprint — no PDE solver required.
   dimensional cell parameters (thickness, particle size, conductivities,
   kinetics, …) and get V–Q curves at any C-rates. Built-in NMC532 OCV or
   upload your own.
-- **Fit your data** — upload discharge CSVs at 2–3 C-rates plus an OCV
+- **Fit discharge data** — upload discharge CSVs at 2–3 C-rates plus an OCV
   reference; a global (dual-annealing) fit returns the lean descriptors
   (`Da_w`, `Da`, `Da_p` at 1C, `R_s`, start stoichiometry, usable-capacity
   fraction) and the voltage RMS. Includes a demo dataset (HP-NMC111
   half-cell, digitized from Ren et al. 2019).
+- **Fit EIS** — upload an impedance spectrum (frequency, Z′, Z″) and fit the
+  *analytical* lean-model impedance directly (no equivalent circuit),
+  returning `R_Ω`, the impedance scale, `Da_w`, `Da_p`, `Da_c`, and the
+  conductivity ratio, with an interactive Nyquist overlay. A synthetic demo
+  spectrum is included.
 - **Damköhler calculator** — dimensional parameters → all four groups plus
   the effective conductivity and an electrolyte-limitation check
   (`Da` vs `Da_p`).
 
+All charts are interactive (Plotly): hover for values, zoom into arcs and
+end-of-discharge knees.
+
 ## Data format
 
-CSV with two columns: **normalized capacity (0–1)** and **voltage (V)**.
-A header row is optional. If the capacity column exceeds 1.5 the app assumes
-raw capacity (e.g. mAh/g) and rescales by the maximum. Name discharge files
-like `0.5C.csv`, `1C.csv`, `2C.csv` for automatic C-rate detection.
+Discharge/OCV: CSV with two columns, **normalized capacity (0–1)** and
+**voltage (V)**. A header row is optional. If the capacity column exceeds
+1.5 the app assumes raw capacity (e.g. mAh/g) and rescales by the maximum.
+Name discharge files like `0.5C.csv`, `1C.csv`, `2C.csv` for automatic
+C-rate detection.
+
+EIS: CSV with three columns, **frequency (Hz)**, **Z′ (Ω)**, **Z″ (Ω)**
+(a mostly-positive imaginary column is auto-interpreted as −Z″).
+
 Sample files are in `sample_data/`.
 
 ## Run locally
@@ -61,15 +74,19 @@ docker run -p 8501:8501 -v "$PWD":/app -w /app python:3.12-slim \
 ## Project layout
 
 ```
-app.py                     Streamlit UI (tabs: predict / fit / calculator / about)
+app.py                     Streamlit UI (predict / fit V-Q / fit EIS /
+                           calculator / about)
 lean_model/
   kinetics.py              CIET/MHC exchange-current factor f(c) and its
                            electrolyte log-derivative (NumPy only)
   model.py                 leading-order analytical V-Q solution (predict_vq)
+  eis.py                   analytical impedance + EIS fitter
   dimensionless.py         dimensional parameters -> Da, Da_p, Da_w, Da_c
-  ocv.py                   built-in NMC532 OCV + tabulated-OCV interpolant
+  ocv.py                   built-in NMC532 OCV (+derivative) and
+                           tabulated-OCV interpolant
   fitting.py               dual-annealing fit of the 7 lean descriptors
 sample_data/               demo half-cell data (Ren et al. 2019, HP-NMC111)
+                           + synthetic EIS spectrum
 requirements.txt
 ```
 
