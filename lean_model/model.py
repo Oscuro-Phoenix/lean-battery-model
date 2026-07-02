@@ -55,7 +55,7 @@ def predict_vq(ocv_function, X, Da_w, Da_w_sigma, Da_w_kappa, Da, Da_p,
     return V
 
 
-def model_V(soc, params, crate, ocv, drop_saturated=False):
+def model_V(soc, params, crate, ocv, drop_saturated=False, v_min=None):
     """Lean-model voltage at normalized capacity points `soc` for C-rate `crate`.
 
     ``params`` is the 7-tuple used throughout the app and the fitter:
@@ -67,6 +67,9 @@ def model_V(soc, params, crate, ocv, drop_saturated=False):
         Da_p1  process Damkohler number at 1C (Da_p = Da_p1 / crate)
         R_s    lumped series resistance, ohmic drop proportional to C [V/C]
         frac   usable fraction of the measured capacity (cs -> 1 at soc = frac)
+
+    If ``v_min`` is given, voltages below the cutoff are masked to NaN so the
+    discharge terminates at the cutoff instead of diving indefinitely.
     """
     a, Da_w, beta, Da, Da_p1, R_s, frac = params
     span = (1.0 - a) / frac
@@ -79,4 +82,7 @@ def model_V(soc, params, crate, ocv, drop_saturated=False):
 
     V = predict_vq(ocv_of_cs, cs, Da_w, Da_w_s, Da_w_k, Da, Da_p,
                    drop_saturated=drop_saturated)
-    return V - R_s * crate
+    V = V - R_s * crate
+    if v_min is not None:
+        V = np.where(V >= v_min, V, np.nan)
+    return V

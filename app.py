@@ -76,7 +76,7 @@ def rate_colors(crates):
     return {c: cmap(0.05 + 0.9 * (c - lo) / span) for c in crates}
 
 
-def plot_curves(curves, params, ocv, title=""):
+def plot_curves(curves, params, ocv, title="", v_min=None):
     """Overlay measured points (if any) and lean-model curves."""
     fig, ax = plt.subplots(figsize=(7.5, 5))
     colors = rate_colors(list(curves.keys()))
@@ -87,10 +87,14 @@ def plot_curves(curves, params, ocv, title=""):
             soc, V = data
             ax.scatter(soc, V, s=28, color=colors[crate], edgecolors="black",
                        linewidths=0.5, alpha=0.8, zorder=3)
-        ax.plot(socg, model_V(socg, params, crate, ocv, drop_saturated=True),
+        ax.plot(socg, model_V(socg, params, crate, ocv, drop_saturated=True,
+                              v_min=v_min),
                 lw=2.2, color=colors[crate], label=f"{crate:g}C", zorder=2)
     socf = np.linspace(1e-3, 0.999, 400)
     ax.plot(socf, ocv(socf), color="0.45", ls=(0, (4, 3)), lw=1.4, label="OCV")
+    if v_min is not None:
+        ax.axhline(v_min, color="0.6", lw=0.9, ls=":", zorder=1)
+        ax.set_ylim(bottom=v_min - 0.1)
     ax.set_xlabel("Normalized capacity (–)")
     ax.set_ylabel("Voltage (V)")
     ax.set_xlim(0, 1)
@@ -101,12 +105,13 @@ def plot_curves(curves, params, ocv, title=""):
     return fig
 
 
-def predictions_csv(params, crates, ocv) -> bytes:
+def predictions_csv(params, crates, ocv, v_min=None) -> bytes:
     frac = params[6]
     socg = np.linspace(1e-3, min(frac, 0.999), 400)
     out = {"normalized_capacity": socg, "OCV_V": ocv(socg)}
     for c in crates:
-        out[f"V_{c:g}C"] = model_V(socg, params, c, ocv, drop_saturated=True)
+        out[f"V_{c:g}C"] = model_V(socg, params, c, ocv, drop_saturated=True,
+                                   v_min=v_min)
     return pd.DataFrame(out).to_csv(index=False).encode()
 
 
@@ -157,6 +162,10 @@ with tab_predict:
         frac = st.slider("Usable capacity fraction", 0.70, 1.00, 1.00, 0.01)
         R_s = st.number_input("Series resistance R_s (V per C-rate)",
                               0.0, 0.5, 0.0, 0.005, format="%.3f")
+        v_cut = st.number_input(
+            "Lower cutoff voltage (V)", 0.0, 5.0, 3.0, 0.05,
+            help="Discharge terminates here, as in a real cycler; the model "
+                 "voltage is masked below this value.")
 
     if mode == "Dimensionless groups":
         with cB:
@@ -210,10 +219,10 @@ with tab_predict:
         params = (a, Da_w_tot, min(beta, 0.5), groups["Da"], groups["Da_p"],
                   R_s, frac)
 
-    fig = plot_curves({c: None for c in crates}, params, ocv)
+    fig = plot_curves({c: None for c in crates}, params, ocv, v_min=v_cut)
     st.pyplot(fig, use_container_width=False)
     st.download_button("Download predicted curves (CSV)",
-                       predictions_csv(params, crates, ocv),
+                       predictions_csv(params, crates, ocv, v_min=v_cut),
                        "lean_model_prediction.csv", "text/csv")
 
 
@@ -281,9 +290,13 @@ with tab_fit:
                       f"{r['frac']:.3f}", f"{r['rms'] * 1e3:.1f}"],
         }), hide_index=True, use_container_width=True)
 
+        # end model curves at the lowest measured voltage (the cell's cutoff)
+        v_cut_fit = min(float(v.min())
+                        for _, v in st.session_state["fit_curves"].values())
         fig = plot_curves(st.session_state["fit_curves"], tuple(r["x"]),
                           st.session_state["fit_ocv"],
-                          title="Measured (points) vs lean model (lines)")
+                          title="Measured (points) vs lean model (lines)",
+                          v_min=v_cut_fit)
         st.pyplot(fig, use_container_width=False)
 
         payload = {k: (float(v) if np.isscalar(v) else list(map(float, v)))
