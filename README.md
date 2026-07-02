@@ -42,8 +42,8 @@ fingerprint — no PDE solver required.
   with the lean-model validity and electrolyte-limitation regions from the
   paper.
 
-All charts are interactive (Plotly): hover for values, zoom into arcs and
-end-of-discharge knees.
+All charts are interactive (Plotly, dark theme): hover for values, zoom
+into arcs and end-of-discharge knees.
 
 ## Data format
 
@@ -60,29 +60,28 @@ Sample files are in `sample_data/`.
 
 ## Community database persistence (optional)
 
-Submissions are always saved to `community_data/cells.csv` next to the app.
-On a persistent host (Docker, your own server) that's enough — the file
-just accumulates. On **Streamlit Community Cloud** the filesystem resets on
-redeploy/reboot, so for a durable, genuinely public database configure the
-app to also commit submissions straight to this GitHub repo via the
-Contents API:
+Submissions are always saved to `community_data/cells.csv` next to the app
+as a fallback/cache. On a persistent host (Docker, your own server) that's
+enough. On **Streamlit Community Cloud** the filesystem resets on
+redeploy/reboot, so for a durable, genuinely shared database point the app
+at any SQLAlchemy-compatible database — a free Postgres instance from
+[Supabase](https://supabase.com), [Neon](https://neon.tech), or
+[Render](https://render.com) all work well and take about two minutes to
+provision:
 
-1. Create a fine-grained GitHub personal access token with **Contents:
-   read & write** on this repo only.
+1. Create a free Postgres database and copy its connection string.
 2. In the deployed app, go to **Settings → Secrets** (or add a local
    `.streamlit/secrets.toml`, which is git-ignored) and set:
 
    ```toml
-   [github]
-   token = "github_pat_..."
-   repo = "your-user/lean-battery-model"
-   path = "community_data/cells.csv"
-   branch = "main"
+   [connections.cells_db]
+   url = "postgresql://user:password@host:5432/dbname"
    ```
 
-3. Reboot the app. The **Community Database** page will confirm public
-   persistence is active; without it, submissions still work but are local
-   to the running instance only.
+3. Reboot the app. It creates the `community_cells` table automatically on
+   first use. The **Community Database** page will stop showing the
+   "no shared database configured" notice once it's connected; without it,
+   submissions still work but are local to the running instance only.
 
 ## Run locally
 
@@ -127,7 +126,8 @@ lean_model/
                            tabulated-OCV interpolant
   fitting.py               dual-annealing fit of the 7 lean descriptors
   database.py              community database: seed literature electrodes,
-                           local CSV + optional GitHub-backed persistence
+                           local CSV cache + optional SQL-backed persistence
+  uistyle.py               shared dark/minimal Plotly theme for every page
 community_data/cells.csv   community submissions (local cache)
 sample_data/               demo half-cell data (Ren et al. 2019, HP-NMC111)
                            + synthetic EIS spectrum

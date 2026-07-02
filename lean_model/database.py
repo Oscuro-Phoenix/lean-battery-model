@@ -9,37 +9,31 @@ regions from the paper.
 Persistence
 -----------
 Submissions are always appended to a local CSV (``community_data/cells.csv``
-next to this package). On Streamlit Community Cloud that file resets on
-reboot/redeploy, so for durable, genuinely public storage this module can
-optionally commit the updated CSV back to a GitHub repo via the Contents
-API -- configure it with Streamlit secrets:
+next to this package) as a fallback/cache. For a genuinely durable, public
+database that survives Streamlit Community Cloud redeploys, point this
+module at any SQLAlchemy-compatible database (a free Postgres instance from
+Supabase, Neon, or Render works well) via Streamlit's native SQL connection
+secrets:
 
-    [github]
-    token = "ghp_..."             # repo-scoped personal access token
-    repo  = "owner/name"          # e.g. "Oscuro-Phoenix/lean-battery-model"
-    path  = "community_data/cells.csv"
-    branch = "main"
+    [connections.cells_db]
+    url = "postgresql://user:password@host:5432/dbname"
 
-If no such secrets are configured, the app still works with local-only
-persistence (submissions survive within the running instance / local dev,
-but not across a cloud redeploy) and shows a note to that effect.
+or, equivalently, discrete fields (dialect/host/port/database/username/
+password) -- see https://docs.streamlit.io/develop/tutorials/databases.
+With that configured, ``st.connection("cells_db", type="sql")`` picks it up
+automatically; the community table is created on first use. Without it, the
+app still works with local-only persistence and shows a note to that effect.
 """
 
 from __future__ import annotations
 
-import base64
 import datetime as _dt
-import io
-import json
 import os
 import uuid
 
 import pandas as pd
 
-try:
-    import requests
-except ImportError:  # pragma: no cover - requests ships with streamlit
-    requests = None
+TABLE = "community_cells"
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_CSV = os.path.join(ROOT, "community_data", "cells.csv")
@@ -49,6 +43,7 @@ COLUMNS = [
     "source_note", "crate_ref", "a", "Da_w", "Da", "Da_p", "Da_c", "R_s",
     "frac", "rms_mV", "is_reference",
 ]
+DB_COLUMNS = [c for c in COLUMNS if c != "is_reference"]
 
 # Literature reference electrodes from the manuscript's design-envelope
 # figure, computed with this package's own compute_da_numbers so they are
@@ -84,10 +79,6 @@ def _seed_dataframe() -> pd.DataFrame:
         row["timestamp"] = None
         row["contributor"] = "Pathak & Bazant (manuscript)"
         row["method"] = "literature"
-        row["a"] = None
-        row["R_s"] = None
-        row["frac"] = None
-        row["rms_mV"] = None
         row["is_reference"] = True
         rows.append(row)
     return pd.DataFrame(rows, columns=COLUMNS)
@@ -98,14 +89,17 @@ def _empty_dataframe() -> pd.DataFrame:
 
 
 def _coerce_is_reference(df: pd.DataFrame) -> pd.DataFrame:
-    """CSV round-trips turn the bool column into strings ('True'/'False');
-    normalize back to real booleans so ``~df['is_reference']`` behaves."""
+    """CSV/SQL round-trips can turn the bool column into strings; normalize
+    back to real booleans so ``~df['is_reference']`` behaves."""
     if "is_reference" in df.columns:
         df["is_reference"] = (
             df["is_reference"].astype(str).str.strip().str.lower()
-            .map({"true": True, "false": False}).fillna(False))
+            .map({"true": True, "false": False, "1": True, "0": False})
+            .fillna(False))
     return df
 
+
+# ── local CSV fallback ───────────────────────────────────────────────────
 
 def _load_local() -> pd.DataFrame:
     if not os.path.exists(LOCAL_CSV):
@@ -120,99 +114,101 @@ def _load_local() -> pd.DataFrame:
         return _empty_dataframe()
 
 
-def _save_local(df: pd.DataFrame) -> None:
+def _append_local(row: dict) -> None:
+    df = _load_local()
+    new_row = pd.DataFrame([row], columns=COLUMNS)
+    df = new_row if df.empty else pd.concat([df, new_row], ignore_index=True)
     os.makedirs(os.path.dirname(LOCAL_CSV), exist_ok=True)
     df.to_csv(LOCAL_CSV, index=False)
 
 
-def _github_config():
-    """Return (token, repo, path, branch) from st.secrets, or None if unset."""
+# ── SQL database backend (optional, durable) ────────────────────────────
+
+def _secrets_files_exist() -> bool:
+    """Check for a secrets.toml on disk without touching st.secrets, which
+    would otherwise print a visible in-app warning when none exists."""
+    home = os.path.expanduser(
+        "~/.streamlit/secrets.toml" if os.name != "nt"
+        else os.path.join(os.environ.get("USERPROFILE", ""), ".streamlit",
+                          "secrets.toml"))
+    project = os.path.join(ROOT, ".streamlit", "secrets.toml")
+    return os.path.exists(home) or os.path.exists(project)
+
+
+def _get_conn():
+    """Return a cached st.connection to the community DB, or None if the
+    ``[connections.cells_db]`` secret isn't configured / unreachable."""
+    if not _secrets_files_exist():
+        return None
     try:
         import streamlit as st
-        gh = st.secrets.get("github")
-    except Exception:
-        gh = None
-    if not gh or not gh.get("token") or not gh.get("repo"):
-        return None
-    return (gh["token"], gh["repo"], gh.get("path", "community_data/cells.csv"),
-            gh.get("branch", "main"))
-
-
-def github_configured() -> bool:
-    return _github_config() is not None
-
-
-def _github_fetch() -> pd.DataFrame | None:
-    """Fetch the current community CSV from GitHub, or None on any failure."""
-    cfg = _github_config()
-    if cfg is None or requests is None:
-        return None
-    token, repo, path, branch = cfg
-    api = f"https://api.github.com/repos/{repo}/contents/{path}"
-    headers = {"Authorization": f"Bearer {token}",
-               "Accept": "application/vnd.github+json"}
-    try:
-        r = requests.get(api, headers=headers, params={"ref": branch}, timeout=10)
-        if r.status_code != 200:
+        secrets = st.secrets
+        if "connections" not in secrets or "cells_db" not in secrets["connections"]:
             return None
-        raw = base64.b64decode(r.json()["content"])
-        df = pd.read_csv(io.BytesIO(raw))
-        for c in COLUMNS:
-            if c not in df.columns:
-                df[c] = None
-        return _coerce_is_reference(df[COLUMNS])
+        return st.connection("cells_db", type="sql")
     except Exception:
         return None
 
 
-def _github_sync(df: pd.DataFrame) -> tuple[bool, str]:
-    """Commit the community CSV to GitHub via the Contents API, if configured."""
-    cfg = _github_config()
-    if cfg is None or requests is None:
-        return False, "GitHub persistence not configured."
-    token, repo, path, branch = cfg
-    api = f"https://api.github.com/repos/{repo}/contents/{path}"
-    headers = {"Authorization": f"Bearer {token}",
-               "Accept": "application/vnd.github+json"}
-    content = base64.b64encode(df.to_csv(index=False).encode()).decode()
-    sha = None
+def db_configured() -> bool:
+    return _get_conn() is not None
+
+
+def _ensure_table(conn) -> None:
+    from sqlalchemy import text
+    cols_sql = ",\n            ".join(
+        f"{c} DOUBLE PRECISION" if c in
+        ("crate_ref", "a", "Da_w", "Da", "Da_p", "Da_c", "R_s", "frac", "rms_mV")
+        else f"{c} TEXT" for c in DB_COLUMNS)
+    with conn.session as s:
+        s.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+            {cols_sql},
+            PRIMARY KEY (id)
+            )
+        """))
+        s.commit()
+
+
+def _load_from_db(conn) -> pd.DataFrame:
+    _ensure_table(conn)
+    df = conn.query(f"SELECT * FROM {TABLE} ORDER BY timestamp", ttl=15)
+    for c in COLUMNS:
+        if c not in df.columns:
+            df[c] = None
+    df["is_reference"] = False
+    return _coerce_is_reference(df[COLUMNS])
+
+
+def _insert_into_db(conn, row: dict) -> None:
+    from sqlalchemy import text
+    _ensure_table(conn)
+    cols = DB_COLUMNS
+    placeholders = ", ".join(f":{c}" for c in cols)
+    collist = ", ".join(cols)
+    with conn.session as s:
+        s.execute(text(f"INSERT INTO {TABLE} ({collist}) VALUES ({placeholders})"),
+                  {c: row[c] for c in cols})
+        s.commit()
     try:
-        r = requests.get(api, headers=headers, params={"ref": branch}, timeout=10)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
-    except Exception as exc:
-        return False, f"GitHub read failed: {exc}"
-    payload = {
-        "message": "Add community cell submission",
-        "content": content,
-        "branch": branch,
-    }
-    if sha:
-        payload["sha"] = sha
-    try:
-        r = requests.put(api, headers=headers, data=json.dumps(payload), timeout=10)
-        if r.status_code in (200, 201):
-            return True, "Synced to GitHub."
-        return False, f"GitHub write failed ({r.status_code}): {r.text[:200]}"
-    except Exception as exc:
-        return False, f"GitHub write failed: {exc}"
+        import streamlit as st
+        st.cache_data.clear()
+    except Exception:
+        pass
 
 
-def _load_community() -> pd.DataFrame:
-    """Community submissions: GitHub is the source of truth when configured
-    (so the database survives cloud reboots/redeploys); the local CSV is a
-    cache and the fallback when GitHub is unreachable or unconfigured."""
-    if github_configured():
-        df = _github_fetch()
-        if df is not None:
-            _save_local(df)
-            return df
-    return _load_local()
-
+# ── public API ───────────────────────────────────────────────────────────
 
 def load_database(include_reference: bool = True) -> pd.DataFrame:
     """Full community database: seed literature electrodes + submissions."""
-    community = _load_community()
+    conn = _get_conn()
+    if conn is not None:
+        try:
+            community = _load_from_db(conn)
+        except Exception:
+            community = _load_local()
+    else:
+        community = _load_local()
     if not include_reference:
         return community
     if community.empty:
@@ -221,8 +217,7 @@ def load_database(include_reference: bool = True) -> pd.DataFrame:
 
 
 def append_entry(entry: dict) -> tuple[bool, str]:
-    """Append one submission to the database (local CSV, and GitHub if
-    configured -- see module docstring for the secrets needed).
+    """Add one submission to the shared database (or the local fallback).
 
     ``entry`` should contain at least: contributor, cell_name, chemistry,
     method, source_note, crate_ref, Da_w, Da, Da_p; other COLUMNS are
@@ -233,13 +228,15 @@ def append_entry(entry: dict) -> tuple[bool, str]:
     row["timestamp"] = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     row["is_reference"] = False
 
-    df = _load_community()
-    new_row = pd.DataFrame([row], columns=COLUMNS)
-    df = new_row if df.empty else pd.concat([df, new_row], ignore_index=True)
-    _save_local(df)
+    conn = _get_conn()
+    if conn is not None:
+        try:
+            _insert_into_db(conn, row)
+            return True, "Saved to the shared database — visible to everyone."
+        except Exception as exc:
+            _append_local(row)
+            return False, f"Database write failed ({exc}); saved locally only."
 
-    if github_configured():
-        ok, msg = _github_sync(df)
-        return ok, msg
-    return True, ("Saved locally. Configure GitHub secrets for durable, "
-                  "publicly-shared persistence across app restarts.")
+    _append_local(row)
+    return True, ("Saved locally only. Configure a database connection "
+                  "(see README) for durable, publicly-shared storage.")

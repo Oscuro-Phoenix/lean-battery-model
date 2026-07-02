@@ -1,14 +1,13 @@
-"""Community Database — universal Damkohler-space plot of every submitted cell."""
-
-import os
+"""Community Database — universal Damkohler-space map of every submitted cell."""
 
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 try:
     from lean_model import database
+    from lean_model.uistyle import CHEM_COLORS, MARKER_LINE, style_fig
 except ImportError:
     import importlib
     import sys as _sys
@@ -16,6 +15,7 @@ except ImportError:
         del _sys.modules[_m]
     importlib.invalidate_caches()
     from lean_model import database
+    from lean_model.uistyle import CHEM_COLORS, MARKER_LINE, style_fig
 
 st.set_page_config(page_title="Community Database — Lean Battery Model",
                    page_icon="🌐", layout="wide")
@@ -23,31 +23,26 @@ st.set_page_config(page_title="Community Database — Lean Battery Model",
 st.title("🌐 Community Database")
 st.caption(
     "Every cell characterized with this tool — literature references plus "
-    "community submissions — placed on the same Damköhler map from "
-    "*Scaling and Analytical Approximation of Porous Electrode Theory for "
+    "community submissions — on the same Damköhler map from *Scaling and "
+    "Analytical Approximation of Porous Electrode Theory for "
     "Reaction-limited Batteries* (Pathak & Bazant)."
 )
 
-if not database.github_configured():
+if not database.db_configured():
     st.info(
-        "ℹ️ This deployment doesn't have public GitHub persistence "
-        "configured, so community submissions are stored locally to this "
-        "running instance only (they will reset on the next redeploy). "
-        "See `lean_model/database.py` for the two-minute setup.")
+        "ℹ️ No shared database is configured for this deployment, so "
+        "community submissions are stored locally to this running instance "
+        "only (they reset on the next redeploy). See `lean_model/database.py` "
+        "for a two-minute setup with a free Postgres database.")
 
 df = database.load_database()
-
-CHEM_COLORS = {
-    "cathode": "#d62728", "anode": "#1f77b4", "full cell": "#2ca02c",
-    "pseudocapacitor": "#9467bd", "other": "#7f7f7f",
-}
 
 with st.sidebar:
     st.markdown("### Filters")
     chems = sorted(df["chemistry"].dropna().unique().tolist())
     pick = st.multiselect("Chemistry / type", chems, default=chems)
-    show_ref = st.checkbox("Show literature reference electrodes", True)
-    show_community = st.checkbox("Show community submissions", True)
+    show_ref = st.checkbox("Literature reference electrodes", True)
+    show_community = st.checkbox("Community submissions", True)
 
 mask = df["chemistry"].isin(pick)
 if not show_ref:
@@ -56,94 +51,77 @@ if not show_community:
     mask &= df["is_reference"].astype(bool)
 view = df[mask].copy()
 
-st.markdown(f"**{len(view)}** cell(s) shown "
-           f"({int(df['is_reference'].astype(bool).sum())} reference, "
-           f"{int((~df['is_reference'].astype(bool)).sum())} community).")
+n_ref = int(df["is_reference"].astype(bool).sum())
+n_com = int((~df["is_reference"].astype(bool)).sum())
+st.markdown(f"**{len(view)}** cell(s) shown — {n_ref} reference, {n_com} community.")
 
 
-def _scatter_by_chem(fig, x, y, name_suffix, symbol_ref="diamond",
-                     symbol_com="circle"):
+PANELS = [
+    dict(y="Da_w", ytitle="Da_w  (wiring)", title="Wiring vs. process",
+        region=lambda x: 1e2 * x, region_label="lean-model validity (Da_w ≲ 10² Da_p)"),
+    dict(y="Da", ytitle="Da  (electrolyte)", title="Electrolyte vs. process",
+        region=lambda x: x, region_label="electrolyte not limiting (Da ≲ Da_p)"),
+    dict(y="Da_c", ytitle="Da_c  (capacitive)", title="Capacitive vs. process",
+        region=None, region_label=None),
+]
+
+valid = view.dropna(subset=["Da_p"])
+if not valid.empty:
+    xlo = max(valid["Da_p"].min() * 0.5, 1e-4)
+    xhi = valid["Da_p"].max() * 2
+else:
+    xlo, xhi = 1e-2, 1e3
+xrange = [np.log10(xlo), np.log10(xhi)]
+xx = np.logspace(*xrange, 60)
+
+fig = make_subplots(rows=1, cols=3, horizontal_spacing=0.08,
+                    subplot_titles=[p["title"] for p in PANELS])
+
+for col, panel in enumerate(PANELS, start=1):
+    if panel["region"] is not None:
+        yy = panel["region"](xx)
+        fig.add_trace(go.Scatter(
+            x=np.concatenate([xx, xx[::-1]]),
+            y=np.concatenate([yy, np.full_like(xx, 1e-6)]),
+            fill="toself", fillcolor="rgba(46,204,154,0.14)",
+            line=dict(width=0), showlegend=False, hoverinfo="skip"),
+            row=1, col=col)
     for chem in sorted(view["chemistry"].dropna().unique()):
-        sub = view[view["chemistry"] == chem]
-        for is_ref, symbol in ((True, symbol_ref), (False, symbol_com)):
-            s = sub[sub["is_reference"].astype(bool) == is_ref]
-            s = s.dropna(subset=[x, y])
-            if s.empty:
-                continue
-            label = f"{chem} ({'ref' if is_ref else 'community'})"
-            fig.add_trace(go.Scatter(
-                x=s[x], y=s[y], mode="markers", name=label,
-                marker=dict(color=CHEM_COLORS.get(chem, "#7f7f7f"), size=11,
-                            symbol=symbol,
-                            line=dict(color="black", width=0.8)),
-                customdata=np.stack([s["cell_name"], s["contributor"].fillna(""),
-                                    s["source_note"].fillna("")], axis=-1),
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>" + x + "=%{x:.3g}<br>" +
-                    y + "=%{y:.3g}<br>%{customdata[1]}<br>%{customdata[2]}"
-                    "<extra></extra>")))
+        sub = view[view["chemistry"] == chem].dropna(subset=["Da_p", panel["y"]])
+        if sub.empty:
+            continue
+        is_ref = sub["is_reference"].astype(bool)
+        symbols = np.where(is_ref, "diamond", "circle")
+        sizes = np.where(is_ref, 13, 10)
+        fig.add_trace(go.Scatter(
+            x=sub["Da_p"], y=sub[panel["y"]], mode="markers", name=chem,
+            legendgroup=chem, showlegend=(col == 1),
+            marker=dict(color=CHEM_COLORS.get(chem, "#9aa4b2"), size=sizes,
+                        symbol=symbols, line=dict(color=MARKER_LINE, width=0.8)),
+            customdata=np.stack([sub["cell_name"], sub["contributor"].fillna(""),
+                                sub["source_note"].fillna("")], axis=-1),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>Da_p=%{x:.3g}<br>" + panel["y"] +
+                "=%{y:.3g}<br>%{customdata[1]}<br>%{customdata[2]}"
+                "<extra></extra>")),
+            row=1, col=col)
+    fig.update_xaxes(title="Da_p  (process)", type="log", range=xrange,
+                     row=1, col=col)
+    fig.update_yaxes(title=panel["ytitle"], type="log",
+                     scaleanchor=f"x{col if col > 1 else ''}", scaleratio=1,
+                     row=1, col=col)
 
+style_fig(fig, height=440, legend=dict(orientation="h", yanchor="bottom", y=1.16,
+                                       groupclick="togglegroup"))
+for ann in fig.layout.annotations:
+    ann.font = dict(color="#e6edf3", size=14)
+st.plotly_chart(fig, use_container_width=True)
 
-st.markdown("#### Wiring vs. process — lean-model validity")
 st.caption(
-    "The lean model's leading-order solution is accurate while the wiring "
-    "group stays modest relative to the process group; literature cells and "
-    "submissions falling well above the shaded band are wiring-limited and "
-    "need the full (higher-order) theory."
+    "◆ literature reference · ● community submission — shaded bands mark "
+    "the lean-model validity region (left) and where the electrolyte is "
+    "not rate-limiting (middle), from the manuscript's design envelope."
 )
-fig1 = go.Figure()
-if not view.dropna(subset=["Da_p", "Da_w"]).empty:
-    xx = np.logspace(
-        np.log10(max(view["Da_p"].min() * 0.5, 1e-3)),
-        np.log10(view["Da_p"].max() * 2), 50)
-    fig1.add_trace(go.Scatter(
-        x=np.concatenate([xx, xx[::-1]]),
-        y=np.concatenate([1e2 * xx, np.full_like(xx, 1e-2)]),
-        fill="toself", fillcolor="rgba(44,160,44,0.12)",
-        line=dict(width=0), name="lean-model validity (Da_w ≲ 10² Da_p)",
-        hoverinfo="skip"))
-_scatter_by_chem(fig1, "Da_p", "Da_w", "wiring")
-fig1.update_layout(
-    xaxis=dict(title="Da_p  (process)", type="log"),
-    yaxis=dict(title="Da_w  (wiring)", type="log"),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    margin=dict(l=10, r=10, t=30, b=10), height=480, template="plotly_white")
-st.plotly_chart(fig1, use_container_width=True)
-
-st.markdown("#### Electrolyte vs. process — salt-depletion onset")
-st.caption(
-    "Below the shaded diagonal (Da ≲ Da_p) electrolyte transport keeps up "
-    "with the applied rate; above it the electrolyte is expected to be "
-    "rate-limiting at the reference C-rate."
-)
-fig2 = go.Figure()
-if not view.dropna(subset=["Da_p", "Da"]).empty:
-    xx2 = np.logspace(
-        np.log10(max(view["Da_p"].min() * 0.5, 1e-3)),
-        np.log10(view["Da_p"].max() * 2), 50)
-    fig2.add_trace(go.Scatter(
-        x=np.concatenate([xx2, xx2[::-1]]),
-        y=np.concatenate([xx2, np.full_like(xx2, 1e-2)]),
-        fill="toself", fillcolor="rgba(44,160,44,0.12)",
-        line=dict(width=0), name="electrolyte not limiting (Da ≲ Da_p)",
-        hoverinfo="skip"))
-_scatter_by_chem(fig2, "Da_p", "Da", "electrolyte")
-fig2.update_layout(
-    xaxis=dict(title="Da_p  (process)", type="log"),
-    yaxis=dict(title="Da  (electrolyte)", type="log"),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    margin=dict(l=10, r=10, t=30, b=10), height=480, template="plotly_white")
-st.plotly_chart(fig2, use_container_width=True)
-
-st.markdown("#### Capacitive vs. process — double-layer charging")
-fig3 = go.Figure()
-_scatter_by_chem(fig3, "Da_p", "Da_c", "capacitive")
-fig3.update_layout(
-    xaxis=dict(title="Da_p  (process)", type="log"),
-    yaxis=dict(title="Da_c  (capacitive)", type="log"),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    margin=dict(l=10, r=10, t=30, b=10), height=440, template="plotly_white")
-st.plotly_chart(fig3, use_container_width=True)
 
 st.markdown("#### All entries")
 display_cols = ["cell_name", "chemistry", "method", "crate_ref", "Da_w", "Da",
@@ -157,10 +135,10 @@ st.download_button("Download full database (CSV)",
 
 st.markdown("---")
 st.caption(
-    "Contribute your own cell from the **Fit discharge data**, **Fit EIS**, "
-    "**Damköhler calculator**, or **Predict discharge** pages — look for "
-    "the *\"Add this cell to the public community database\"* panel after "
-    "computing your groups. Submitted data is public, attributed to the "
-    "contributor name you provide (or \"anonymous\"), and limited to "
-    "dimensionless descriptors — no raw curves are shared."
+    "Contribute your own cell from the **Predict discharge**, **Fit "
+    "discharge data**, **Fit EIS**, or **Damköhler calculator** pages — "
+    "look for the *\"Add this cell to the public community database\"* "
+    "panel after computing your groups. Submissions are public, attributed "
+    "to the contributor name you provide (or \"anonymous\"), and limited "
+    "to dimensionless descriptors — no raw curves are shared."
 )

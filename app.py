@@ -40,6 +40,8 @@ except ImportError:
     )
     from lean_model import database
 
+from lean_model.uistyle import MARKER_LINE, style_fig as _style
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SAMPLE_DIR = os.path.join(ROOT, "sample_data")
 
@@ -113,10 +115,10 @@ def crate_from_name(name: str) -> float | None:
 
 
 def rate_colors(crates):
-    cmap = plt.cm.coolwarm
+    cmap = plt.cm.plasma
     lo, hi = min(crates), max(crates)
     span = (hi - lo) or 1.0
-    return {c: to_hex(cmap(0.05 + 0.9 * (c - lo) / span)) for c in crates}
+    return {c: to_hex(cmap(0.15 + 0.75 * (c - lo) / span)) for c in crates}
 
 
 def plot_curves(curves, params, ocv, title="", v_min=None, kin_shape=None):
@@ -128,7 +130,7 @@ def plot_curves(curves, params, ocv, title="", v_min=None, kin_shape=None):
     socf = np.linspace(1e-3, 0.999, 400)
     fig.add_trace(go.Scatter(
         x=socf, y=ocv(socf), mode="lines", name="OCV",
-        line=dict(color="#8a8a8a", width=1.4, dash="dash"),
+        line=dict(color="#8a8f98", width=1.4, dash="dash"),
         hovertemplate="q=%{x:.3f}<br>U=%{y:.3f} V<extra>OCV</extra>"))
     for crate, data in sorted(curves.items()):
         col = colors[crate]
@@ -137,7 +139,7 @@ def plot_curves(curves, params, ocv, title="", v_min=None, kin_shape=None):
             fig.add_trace(go.Scatter(
                 x=soc, y=V, mode="markers", name=f"{crate:g}C data",
                 marker=dict(color=col, size=7,
-                            line=dict(color="black", width=0.5)),
+                            line=dict(color=MARKER_LINE, width=0.6)),
                 hovertemplate="q=%{x:.3f}<br>V=%{y:.3f} V"
                               f"<extra>{crate:g}C data</extra>"))
         fig.add_trace(go.Scatter(
@@ -149,16 +151,12 @@ def plot_curves(curves, params, ocv, title="", v_min=None, kin_shape=None):
             hovertemplate="q=%{x:.3f}<br>V=%{y:.3f} V"
                           f"<extra>{crate:g}C model</extra>"))
     if v_min is not None:
-        fig.add_hline(y=v_min, line=dict(color="#aaaaaa", width=1,
+        fig.add_hline(y=v_min, line=dict(color="#8a8f98", width=1,
                                          dash="dot"))
-    fig.update_layout(
-        title=title or None,
-        xaxis=dict(title="Normalized capacity (–)", range=[0, 1]),
-        yaxis=dict(title="Voltage (V)"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        margin=dict(l=10, r=10, t=60, b=10), height=480,
-        template="plotly_white")
-    return fig
+    extra = {"title": dict(text=title, font=dict(size=15))} if title else {}
+    return _style(fig,
+                 xaxis=dict(title="Normalized capacity (–)", range=[0, 1]),
+                 yaxis=dict(title="Voltage (V)"), height=460, **extra)
 
 
 def nyquist_figure(freq, z_re, z_im, z_fit=None):
@@ -167,24 +165,20 @@ def nyquist_figure(freq, z_re, z_im, z_fit=None):
     fig.add_trace(go.Scatter(
         x=z_re, y=-np.asarray(z_im), mode="markers", name="data",
         customdata=np.asarray(freq),
-        marker=dict(color="#1f77b4", size=7,
-                    line=dict(color="black", width=0.5)),
+        marker=dict(color="#4f8cff", size=7,
+                    line=dict(color=MARKER_LINE, width=0.6)),
         hovertemplate="f=%{customdata:.3g} Hz<br>Z'=%{x:.3g} Ω<br>"
                       "-Z''=%{y:.3g} Ω<extra>data</extra>"))
     if z_fit is not None:
         fig.add_trace(go.Scatter(
             x=np.real(z_fit), y=-np.imag(z_fit), mode="lines",
             name="lean model", customdata=np.asarray(freq),
-            line=dict(color="#d62728", width=2.5),
+            line=dict(color="#ff6f59", width=2.5),
             hovertemplate="f=%{customdata:.3g} Hz<br>Z'=%{x:.3g} Ω<br>"
                           "-Z''=%{y:.3g} Ω<extra>model</extra>"))
-    fig.update_layout(
-        xaxis=dict(title="Z' (Ω)"),
-        yaxis=dict(title="-Z'' (Ω)", scaleanchor="x", scaleratio=1),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        margin=dict(l=10, r=10, t=60, b=10), height=480,
-        template="plotly_white")
-    return fig
+    return _style(fig, xaxis=dict(title="Z' (Ω)"),
+                 yaxis=dict(title="-Z'' (Ω)", scaleanchor="x", scaleratio=1),
+                 height=460)
 
 
 def predictions_csv(params, crates, ocv, v_min=None, kin_shape=None) -> bytes:
@@ -203,22 +197,17 @@ def kinetics_figure(kin_shape=None):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=c, y=ecd_mhc(c), mode="lines", name="CIET/MHC",
-        line=dict(color="#8a8a8a", width=2, dash="dash"),
+        line=dict(color="#8a8f98", width=2, dash="dash"),
         hovertemplate="c=%{x:.3f}<br>f=%{y:.4f}<extra>CIET/MHC</extra>"))
     if kin_shape is not None:
         g, p1, p2 = kin_shape
         fig.add_trace(go.Scatter(
             x=c, y=ecd_mhc_learnable(c, gamma=g, p1=p1, p2=p2),
             mode="lines", name="custom f(c)",
-            line=dict(color="#d62728", width=2.5),
+            line=dict(color="#ff6f59", width=2.5),
             hovertemplate="c=%{x:.3f}<br>f=%{y:.4f}<extra>custom</extra>"))
-    fig.update_layout(
-        xaxis=dict(title="Filling fraction c", range=[0, 1]),
-        yaxis=dict(title="Exchange-current factor f(c)"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        margin=dict(l=10, r=10, t=40, b=10), height=320,
-        template="plotly_white")
-    return fig
+    return _style(fig, xaxis=dict(title="Filling fraction c", range=[0, 1]),
+                 yaxis=dict(title="Exchange-current factor f(c)"), height=300)
 
 
 def contribute_widget(key_prefix: str, groups: dict):
@@ -255,10 +244,10 @@ def contribute_widget(key_prefix: str, groups: dict):
                          source_note=note, method=key_prefix)
             ok, msg = database.append_entry(entry)
             (st.success if ok else st.warning)(msg)
-        if not database.github_configured():
+        if not database.db_configured():
             st.caption(
-                "ℹ️ Public GitHub persistence isn't configured for this "
-                "deployment yet — submissions are saved locally only.")
+                "ℹ️ No shared database is configured for this deployment "
+                "yet — submissions are saved locally only.")
 
 
 def ocv_selector(key: str):
