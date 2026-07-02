@@ -24,6 +24,7 @@ try:
         fit_descriptors, fit_eis, model_V, nmc532_ocv, nmc532_ocv_deriv,
         ocv_derivative, ocv_from_table,
     )
+    from lean_model import database
 except ImportError:
     # After a hot-reload/redeploy the old lean_model package can linger in
     # sys.modules and miss newly added names; evict it and import fresh.
@@ -37,6 +38,7 @@ except ImportError:
         fit_descriptors, fit_eis, model_V, nmc532_ocv, nmc532_ocv_deriv,
         ocv_derivative, ocv_from_table,
     )
+    from lean_model import database
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SAMPLE_DIR = os.path.join(ROOT, "sample_data")
@@ -219,6 +221,46 @@ def kinetics_figure(kin_shape=None):
     return fig
 
 
+def contribute_widget(key_prefix: str, groups: dict):
+    """Optional form to add a characterized cell's Damkohler groups to the
+    public community database (see the 'Community Database' page)."""
+    shown = {k: v for k, v in groups.items() if v is not None}
+    with st.expander("📤 Add this cell to the public community database"):
+        st.caption(
+            "Contribute the dimensionless numbers below to the public "
+            "dataset shown on the **Community Database** page (see the "
+            "sidebar). No raw voltage/impedance data is shared."
+        )
+        c1, c2 = st.columns(2)
+        name = c1.text_input("Cell / electrode name", key=f"{key_prefix}_name")
+        chem = c2.selectbox(
+            "Chemistry / type",
+            ["cathode", "anode", "full cell", "pseudocapacitor", "other"],
+            key=f"{key_prefix}_chem")
+        contributor = c1.text_input(
+            "Contributor (name or handle, optional)", key=f"{key_prefix}_contrib")
+        note = c2.text_input("Source / notes (optional)", key=f"{key_prefix}_note")
+        st.dataframe(pd.DataFrame({
+            "Group": list(shown.keys()),
+            "Value": [f"{v:.4g}" for v in shown.values()],
+        }), hide_index=True, use_container_width=True)
+        agree = st.checkbox(
+            "I confirm this data is non-confidential and OK to share publicly.",
+            key=f"{key_prefix}_agree")
+        if st.button("Submit to community database", key=f"{key_prefix}_submit",
+                     disabled=not (name and agree)):
+            entry = dict(groups)
+            entry.update(cell_name=name, chemistry=chem,
+                         contributor=contributor or "anonymous",
+                         source_note=note, method=key_prefix)
+            ok, msg = database.append_entry(entry)
+            (st.success if ok else st.warning)(msg)
+        if not database.github_configured():
+            st.caption(
+                "ℹ️ Public GitHub persistence isn't configured for this "
+                "deployment yet — submissions are saved locally only.")
+
+
 def ocv_selector(key: str):
     """Shared OCV-source widget. Returns an OCV(soc) callable."""
     src = st.radio("Open-circuit voltage (OCV) source",
@@ -323,6 +365,9 @@ with tab_predict:
         beta = groups["Da_w_sigma"] / Da_w_tot if Da_w_tot else 0.5
         params = (a, Da_w_tot, min(beta, 0.5), groups["Da"], groups["Da_p"],
                   R_s, frac)
+        contribute_widget("predict_dim", dict(
+            crate_ref=1.0, a=a, Da_w=Da_w_tot, Da=groups["Da"],
+            Da_p=groups["Da_p"], Da_c=groups["Da_c"], R_s=R_s, frac=frac))
 
     with st.expander("Exchange-current kinetics f(c) — advanced"):
         st.markdown(
@@ -450,6 +495,11 @@ with tab_fit:
                            json.dumps(payload, indent=2),
                            "lean_model_fit.json", "application/json")
 
+        contribute_widget("fit_vq", dict(
+            crate_ref=1.0, a=r["a"], Da_w=r["Da_w"], Da=r["Da"],
+            Da_p=r["Da_p1"], R_s=r["R_s"], frac=r["frac"],
+            rms_mV=r["rms"] * 1e3))
+
 
 # ── 3. Fit EIS ─────────────────────────────────────────────────────────────
 
@@ -540,6 +590,10 @@ with tab_eis:
                                json.dumps(payload, indent=2),
                                "lean_model_eis_fit.json", "application/json")
 
+            contribute_widget("fit_eis", dict(
+                crate_ref=1.0, Da_w=r["Da_w"], Da_p=r["Da_p1"],
+                Da_c=r["Da_c1"]))
+
 
 # ── 4. Damköhler calculator ────────────────────────────────────────────────
 
@@ -601,6 +655,10 @@ with tab_calc:
     else:
         st.success("Da ≤ Da_p: electrolyte transport is not rate-limiting "
                    "at this C-rate.")
+
+    contribute_widget("calc", dict(
+        crate_ref=crate, Da_w=g["Da_w"], Da=g["Da"], Da_p=g["Da_p"],
+        Da_c=g["Da_c"]))
 
 
 # ── 5. About ───────────────────────────────────────────────────────────────

@@ -32,6 +32,15 @@ fingerprint — no PDE solver required.
 - **Damköhler calculator** — dimensional parameters → all four groups plus
   the effective conductivity and an electrolyte-limitation check
   (`Da` vs `Da_p`).
+- **Community Database** (separate page, sidebar) — a public, crowdsourced
+  Damköhler map. After predicting/fitting/computing a cell's groups on any
+  tab, an *"Add this cell to the public community database"* panel lets you
+  submit its dimensionless fingerprint (no raw curves) with an optional name
+  and source note. The database page plots every submission — plus the
+  manuscript's literature reference electrodes (NMC811, graphite, LFP, LTO,
+  MnO₂) — as `Da_w` vs `Da_p`, `Da` vs `Da_p`, and `Da_c` vs `Da_p`, shaded
+  with the lean-model validity and electrolyte-limitation regions from the
+  paper.
 
 All charts are interactive (Plotly): hover for values, zoom into arcs and
 end-of-discharge knees.
@@ -48,6 +57,32 @@ EIS: CSV with three columns, **frequency (Hz)**, **Z′ (Ω)**, **Z″ (Ω)**
 (a mostly-positive imaginary column is auto-interpreted as −Z″).
 
 Sample files are in `sample_data/`.
+
+## Community database persistence (optional)
+
+Submissions are always saved to `community_data/cells.csv` next to the app.
+On a persistent host (Docker, your own server) that's enough — the file
+just accumulates. On **Streamlit Community Cloud** the filesystem resets on
+redeploy/reboot, so for a durable, genuinely public database configure the
+app to also commit submissions straight to this GitHub repo via the
+Contents API:
+
+1. Create a fine-grained GitHub personal access token with **Contents:
+   read & write** on this repo only.
+2. In the deployed app, go to **Settings → Secrets** (or add a local
+   `.streamlit/secrets.toml`, which is git-ignored) and set:
+
+   ```toml
+   [github]
+   token = "github_pat_..."
+   repo = "your-user/lean-battery-model"
+   path = "community_data/cells.csv"
+   branch = "main"
+   ```
+
+3. Reboot the app. The **Community Database** page will confirm public
+   persistence is active; without it, submissions still work but are local
+   to the running instance only.
 
 ## Run locally
 
@@ -80,6 +115,8 @@ docker run -p 8501:8501 -v "$PWD":/app -w /app python:3.12-slim \
 ```
 app.py                     Streamlit UI (predict / fit V-Q / fit EIS /
                            calculator / about)
+pages/
+  1_Community_Database.py  public Damkohler-space plot of every submitted cell
 lean_model/
   kinetics.py              CIET/MHC exchange-current factor f(c), learnable
                            shape variant, electrolyte log-derivative
@@ -89,6 +126,9 @@ lean_model/
   ocv.py                   built-in NMC532 OCV (+derivative) and
                            tabulated-OCV interpolant
   fitting.py               dual-annealing fit of the 7 lean descriptors
+  database.py              community database: seed literature electrodes,
+                           local CSV + optional GitHub-backed persistence
+community_data/cells.csv   community submissions (local cache)
 sample_data/               demo half-cell data (Ren et al. 2019, HP-NMC111)
                            + synthetic EIS spectrum
 requirements.txt
