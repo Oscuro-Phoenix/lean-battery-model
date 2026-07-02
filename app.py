@@ -18,11 +18,25 @@ import plotly.graph_objects as go
 import streamlit as st
 from matplotlib.colors import to_hex
 
-from lean_model import (
-    compute_da_numbers, ecd_mhc, ecd_mhc_learnable, eis_model,
-    fit_descriptors, fit_eis, model_V, nmc532_ocv, nmc532_ocv_deriv,
-    ocv_derivative, ocv_from_table,
-)
+try:
+    from lean_model import (
+        compute_da_numbers, ecd_mhc, ecd_mhc_learnable, eis_model,
+        fit_descriptors, fit_eis, model_V, nmc532_ocv, nmc532_ocv_deriv,
+        ocv_derivative, ocv_from_table,
+    )
+except ImportError:
+    # After a hot-reload/redeploy the old lean_model package can linger in
+    # sys.modules and miss newly added names; evict it and import fresh.
+    import importlib
+    import sys as _sys
+    for _m in [m for m in list(_sys.modules) if m.startswith("lean_model")]:
+        del _sys.modules[_m]
+    importlib.invalidate_caches()
+    from lean_model import (
+        compute_da_numbers, ecd_mhc, ecd_mhc_learnable, eis_model,
+        fit_descriptors, fit_eis, model_V, nmc532_ocv, nmc532_ocv_deriv,
+        ocv_derivative, ocv_from_table,
+    )
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SAMPLE_DIR = os.path.join(ROOT, "sample_data")
