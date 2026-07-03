@@ -173,6 +173,12 @@ def _ensure_table(conn) -> None:
 def _load_from_db(conn) -> pd.DataFrame:
     _ensure_table(conn)
     df = conn.query(f"SELECT * FROM {TABLE} ORDER BY timestamp", ttl=15)
+    # Unquoted identifiers (Da_w, rms_mV, ...) get case-folded to lowercase
+    # by Postgres/MySQL; map whatever case comes back onto our canonical
+    # column names instead of treating them as missing.
+    lower_to_canon = {c.lower(): c for c in DB_COLUMNS}
+    df = df.rename(columns={c: lower_to_canon[c.lower()]
+                            for c in df.columns if c.lower() in lower_to_canon})
     for c in COLUMNS:
         if c not in df.columns:
             df[c] = None
