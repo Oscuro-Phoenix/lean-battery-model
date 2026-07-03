@@ -188,7 +188,7 @@ def _insert_into_db(conn, row: dict) -> None:
     collist = ", ".join(cols)
     with conn.session as s:
         s.execute(text(f"INSERT INTO {TABLE} ({collist}) VALUES ({placeholders})"),
-                  {c: row[c] for c in cols})
+                  {c: _to_python(row[c]) for c in cols})
         s.commit()
     try:
         import streamlit as st
@@ -216,6 +216,23 @@ def load_database(include_reference: bool = True) -> pd.DataFrame:
     return pd.concat([_seed_dataframe(), community], ignore_index=True)
 
 
+def _to_python(v):
+    """Coerce numpy scalars (e.g. from scipy fits) to plain Python types.
+
+    psycopg2 has no adapter for numpy.float64/int64 and silently falls back
+    to embedding their repr() (``np.float64(...)``) as raw SQL text, which
+    Postgres then tries to parse as a call into a schema named ``np``.
+    """
+    if v is None:
+        return None
+    if hasattr(v, "item") and not isinstance(v, str):
+        try:
+            return v.item()
+        except Exception:
+            return v
+    return v
+
+
 def append_entry(entry: dict) -> tuple[bool, str]:
     """Add one submission to the shared database (or the local fallback).
 
@@ -223,7 +240,7 @@ def append_entry(entry: dict) -> tuple[bool, str]:
     method, source_note, crate_ref, Da_w, Da, Da_p; other COLUMNS are
     optional and default to None.
     """
-    row = {c: entry.get(c) for c in COLUMNS}
+    row = {c: _to_python(entry.get(c)) for c in COLUMNS}
     row["id"] = uuid.uuid4().hex[:12]
     row["timestamp"] = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     row["is_reference"] = False
